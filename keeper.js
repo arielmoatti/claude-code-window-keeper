@@ -91,13 +91,32 @@ function parseAnchor(s) {
   return h < 24 && min < 60 ? { h, m: min } : null;
 }
 
+// claude_path from keeper.conf if it still exists, then ~/.local/bin, then the newest Claude Code
+// bundled with the VS Code extension, then PATH. A claude_path pointing into an extension folder breaks
+// on the next extension update (VS Code deletes the old version's folder), so a missing one falls through.
 function claudeBin(conf) {
-  if (conf.claude_path) return conf.claude_path;
+  if (conf.claude_path && fs.existsSync(conf.claude_path)) return conf.claude_path;
   for (const name of ['claude.exe', 'claude']) {
     const abs = path.join(HOME, '.local', 'bin', name);
     if (fs.existsSync(abs)) return abs;
   }
+  const fromExt = newestExtensionClaude();
+  if (fromExt) return fromExt;
   return 'claude';
+}
+
+function newestExtensionClaude() {
+  const root = path.join(HOME, '.vscode', 'extensions');
+  let dirs = [];
+  try { dirs = fs.readdirSync(root).filter(d => /^anthropic\.claude-code-\d/.test(d)); } catch { return null; }
+  const ver = d => (/^anthropic\.claude-code-(\d+)\.(\d+)\.(\d+)/.exec(d) || []).slice(1).map(Number);
+  dirs.sort((a, b) => { const x = ver(a), y = ver(b); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (y[i] || 0) - (x[i] || 0); return 0; });
+  const exe = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  for (const d of dirs) {
+    const p = path.join(root, d, 'resources', 'native-binary', exe);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
 }
 
 function run(bin, args, opts) {
