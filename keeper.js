@@ -8,11 +8,12 @@
  * opening a fresh 5h.
  *
  * Each run (Task Scheduler, every 10 min, via keeper.vbs):
- *   0. The logged-in plan is Ultra -> exit. Ultra has no 5h window, only the weekly one.
  *   1. The stored window end is still in the future -> exit. Local file read, no network.
  *      The claude-code-vsc-statusline cache is fresh and shows a running window
  *      -> store its end time and exit, no ping.
  *      Inside the 5h before morning_anchor -> exit, so the day's first window opens at the anchor.
+ *      The plan has no 5h limit at all (verified Ultra: five_hour null, no session row in
+ *      limits[]) -> no ping, look again in an hour. Read from the data, not the plan name.
  *   2. Otherwise -> one headless ping (`claude -p` on Haiku, no transcript, no user hooks),
  *      which also refreshes the OAuth token.
  *   3. Read the real window end from the usage endpoint (the token is fresh now, so this
@@ -51,8 +52,6 @@ const LOCK_PATH = path.join(RUN_DIR, 'keeper.lock');
 const PING_CWD = path.join(RUN_DIR, 'ping-cwd');
 const CONF_PATH = path.join(__dirname, 'keeper.conf');
 const CREDENTIALS_PATH = path.join(HOME, '.claude', '.credentials.json');
-// Claude Code's account profile; oauthAccount.planDisplayName is "Ultra" on that plan.
-const CLAUDE_JSON_PATH = path.join(HOME, '.claude.json');
 // Written by the claude-code-vsc-statusline extension while VSCode is open.
 const USAGE_CACHE_PATH = path.join(os.tmpdir(), 'claude', 'statusline-usage-cache.json');
 
@@ -70,14 +69,18 @@ const POLL_ATTEMPTS = 4;
 const POLL_RETRY_MS = 60 * 1000;     // ping + 4 attempts stay inside the task's 5-minute limit
 const LOCK_STALE_MS = 5 * 60 * 1000;
 const WINDOW_MS = 5 * 60 * 60 * 1000;
+const NO_SESSION_RECHECK_MS = 60 * 60 * 1000; // no 5h limit -> look again in an hour (account switch, plan change)
 
 const readJson = p => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
 const iso = ms => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Ultra reports five_hour: null and no session limit, so there is no window to chain and every
-// run would ping. subscriptionType can't tell (it reads "max" on Ultra too); the display name can.
-const onUltra = () => /ultra/i.test(((readJson(CLAUDE_JSON_PATH) || {}).oauthAccount || {}).planDisplayName || '');
+// Verified Ultra accounts have no 5h limit: five_hour comes back null and limits[] has no session
+// row, so there is no window to chain and every run would ping. On Pro/Max an idle window is still
+// an object (0%, resets_at null). Read from the data, not the plan name: an Ultra account that isn't
+// verified yet does have the window, and if the limit ever returns this follows along.
+const noSessionLimit = data => !!data && !!(data.seven_day || Array.isArray(data.limits)) &&
+  data.five_hour == null && !(data.limits || []).some(l => l && l.kind === 'session');
 
 // keeper.conf: key=value lines, # comments. A missing file or key means the default.
 function readConf() {
@@ -185,7 +188,7 @@ function fetchUsage(token) {
 
 const windowOf = data => {
   const fh = (data && data.five_hour) || {};
-  return { resetsAt: fh.resets_at ? Date.parse(fh.resets_at) : NaN, utilization: fh.utilization };
+  return { resetsAt: fh.resets_at ? Date.parse(fh.resets_at) : NaN, utilization: fh.utilization, noSession: noSessionLimit(data) };
 };
 
 // The statusline extension's cache, when it was fetched at or after `since`.
@@ -204,7 +207,7 @@ async function readWindow(since, attempts) {
     if (attempt) {
       await sleep(POLL_RETRY_MS);
       const c = cachedWindow(since);
-      if (c && c.resetsAt > Date.now()) return c;
+      if (c && (c.resetsAt > Date.now() || c.noSession)) return c;
     }
     const token = getOAuthToken();
     if (!token) return { resetsAt: NaN, error: 'no OAuth token: is Claude Code logged in with a subscription?' };
@@ -212,13 +215,32 @@ async function readWindow(since, attempts) {
       const res = await fetchUsage(token);
       if (res.status !== 200) { last = { resetsAt: NaN, error: `usage endpoint HTTP ${res.status}` }; continue; }
       const win = { ...windowOf(JSON.parse(res.body)), source: 'poll' };
-      if (win.resetsAt > Date.now()) return win;
+      if (win.resetsAt > Date.now() || win.noSession) return win;
       last = { ...win, error: 'no window reported yet' };
     } catch (e) {
       last = { resetsAt: NaN, error: 'usage read failed: ' + e.message };
     }
   }
   return last;
+}
+
+// One usage read, no retries. Null when it can't be read (no token, expired token, 429).
+async function pollWindow() {
+  const token = getOAuthToken();
+  if (!token) return null;
+  try {
+    const res = await fetchUsage(token);
+    return res.status === 200 ? { ...windowOf(JSON.parse(res.body)), source: 'poll' } : null;
+  } catch { return null; }
+}
+
+// No 5h limit on this plan: park until the next look. Only the switch into this state is logged,
+// not every hourly look.
+function holdNoSession(state, now, source) {
+  fs.writeFileSync(STATE_PATH, JSON.stringify({ resetsAt: now + NO_SESSION_RECHECK_MS, updatedAt: now, source: 'no-session-limit' }, null, 2));
+  if (state.source !== 'no-session-limit') {
+    fs.appendFileSync(LOG_PATH, JSON.stringify({ at: iso(now), result: 'no-session-limit', source }) + '\n');
+  }
 }
 
 // Chaining keeps the phase set by the previous night's work, so the morning window can land at
@@ -236,7 +258,11 @@ function status() {
   const s = readJson(STATE_PATH) || {};
   const conf = readConf();
   const anchor = parseAnchor(conf.morning_anchor);
-  console.log('window ends:   ', Number.isFinite(s.resetsAt) ? `${new Date(s.resetsAt).toLocaleString()} (from ${s.source})` : '(none stored)');
+  if (s.source === 'no-session-limit') {
+    console.log('window ends:    (no 5h limit on this plan, next look', new Date(s.resetsAt).toLocaleString() + ')');
+  } else {
+    console.log('window ends:   ', Number.isFinite(s.resetsAt) ? `${new Date(s.resetsAt).toLocaleString()} (from ${s.source})` : '(none stored)');
+  }
   console.log('morning anchor:', anchor ? conf.morning_anchor : '(off)');
   console.log('claude:        ', claudeBin(conf));
   try {
@@ -247,7 +273,6 @@ function status() {
 
 async function main() {
   if (process.argv.includes('--status')) return status();
-  if (onUltra()) return;
   fs.mkdirSync(PING_CWD, { recursive: true });
 
   const conf = readConf();
@@ -264,6 +289,11 @@ async function main() {
     }
 
     if (inMorningHold(now, parseAnchor(conf.morning_anchor))) return;
+
+    // No 5h limit on this plan -> nothing to chain. One usage read (no model tokens) before
+    // spending a ping; a read that fails falls through to the ping, which also refreshes the token.
+    const plan = live || await pollWindow();
+    if (plan && plan.noSession) return holdNoSession(state, now, plan.source);
   }
 
   // one ping at a time
@@ -279,9 +309,14 @@ async function main() {
     // a failed ping opened nothing -> one read is enough to see whether a window runs anyway
     const win = await readWindow(pingAt, ping.code === 0 ? POLL_ATTEMPTS : 1);
     const ok = Number.isFinite(win.resetsAt) && win.resetsAt > Date.now();
+    const parked = !ok && !!win.noSession;
 
-    // not ok -> leave resetsAt empty so the next run tries again
-    fs.writeFileSync(STATE_PATH, JSON.stringify({ resetsAt: ok ? win.resetsAt : null, updatedAt: Date.now(), source: win.source }, null, 2));
+    // no 5h limit -> park for an hour; otherwise not ok -> leave resetsAt empty so the next run tries again
+    fs.writeFileSync(STATE_PATH, JSON.stringify({
+      resetsAt: ok ? win.resetsAt : parked ? Date.now() + NO_SESSION_RECHECK_MS : null,
+      updatedAt: Date.now(),
+      source: parked ? 'no-session-limit' : win.source,
+    }, null, 2));
     fs.appendFileSync(LOG_PATH, JSON.stringify({
       pingAt: iso(pingAt),
       prevResetsAt: iso(state.resetsAt),
@@ -291,8 +326,8 @@ async function main() {
       resetsAt: iso(win.resetsAt),
       utilization: win.utilization,
       source: win.source,
-      result: ok ? 'window-open' : 'no-window',
-      error: ok ? undefined : win.error,
+      result: ok ? 'window-open' : parked ? 'no-session-limit' : 'no-window',
+      error: ok || parked ? undefined : win.error,
     }) + '\n');
   } finally {
     try { fs.unlinkSync(LOCK_PATH); } catch { /* already gone */ }
