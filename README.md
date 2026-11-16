@@ -58,7 +58,7 @@
 <ul dir="rtl">
 <li>מערכת Windows 10 או 11</li>
 <li>סביבת Node.js בגרסה 18 ומעלה</li>
-<li>כלי Claude Code בהתקנה הנייטיב (<code>claude.exe</code> תחת <code>~/.local/bin</code>), מחובר <b>למנוי</b> Pro או Max (בעבודה עם מפתח API אין ממילא חלון של 5 שעות, ואין מה לקצר)</li>
+<li>כלי Claude Code בהתקנה הנייטיב (<code>claude.exe</code> תחת <code>~/.local/bin</code>), מחובר <b>למנוי</b> Pro או Max (בעבודה עם מפתח API אין ממילא חלון של 5 שעות, ואין מה לקצר). במנוי Ultra אין חלון של 5 שעות, רק מכסה שבועית, ולכן שם השומר מזהה את זה ולא עושה כלום</li>
 </ul>
 
 ---

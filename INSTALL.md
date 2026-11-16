@@ -36,6 +36,7 @@
    node -e "try{const c=require(require('os').homedir()+'/.claude/.credentials.json');console.log(Boolean(c.claudeAiOauth&&c.claudeAiOauth.accessToken))}catch(e){console.log(false)}"
    ```
    `false` ← עצור והסבר: Window Keeper דורש Claude Code מחובר למנוי Pro או Max (`/login`). עם מפתח API אין חלון של 5 שעות, ואין מה לשמור.
+   - `oauthAccount.planDisplayName` ב-`%USERPROFILE%\.claude.json` הוא Ultra ← אפשר להתקין, אבל ספר למשתמש שבמנוי Ultra אין חלון של 5 שעות, רק מכסה שבועית, ולכן השומר לא יעשה כלום עד שיעבור ל-Pro או Max.
 5. **התקנה קיימת:** האם התיקייה `%USERPROFILE%\.claude\scripts\window-keeper\` קיימת, והאם יש משימה (`Get-ScheduledTask -TaskName Claude-Window-Keeper -ErrorAction SilentlyContinue`). אם יש `keeper.conf`, קרא ממנו את `morning_anchor` ואת `claude_path`.
 6. **שורת הסטטוס** (מידע בלבד): האם קיים `$env:TEMP\claude\statusline-usage-cache.json`. אם כן, התוסף `claude-code-vsc-statusline` מותקן ורץ.
 

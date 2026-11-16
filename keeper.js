@@ -8,6 +8,7 @@
  * opening a fresh 5h.
  *
  * Each run (Task Scheduler, every 10 min, via keeper.vbs):
+ *   0. The logged-in plan is Ultra -> exit. Ultra has no 5h window, only the weekly one.
  *   1. The stored window end is still in the future -> exit. Local file read, no network.
  *      The claude-code-vsc-statusline cache is fresh and shows a running window
  *      -> store its end time and exit, no ping.
@@ -50,6 +51,8 @@ const LOCK_PATH = path.join(RUN_DIR, 'keeper.lock');
 const PING_CWD = path.join(RUN_DIR, 'ping-cwd');
 const CONF_PATH = path.join(__dirname, 'keeper.conf');
 const CREDENTIALS_PATH = path.join(HOME, '.claude', '.credentials.json');
+// Claude Code's account profile; oauthAccount.planDisplayName is "Ultra" on that plan.
+const CLAUDE_JSON_PATH = path.join(HOME, '.claude.json');
 // Written by the claude-code-vsc-statusline extension while VSCode is open.
 const USAGE_CACHE_PATH = path.join(os.tmpdir(), 'claude', 'statusline-usage-cache.json');
 
@@ -71,6 +74,10 @@ const WINDOW_MS = 5 * 60 * 60 * 1000;
 const readJson = p => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
 const iso = ms => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Ultra reports five_hour: null and no session limit, so there is no window to chain and every
+// run would ping. subscriptionType can't tell (it reads "max" on Ultra too); the display name can.
+const onUltra = () => /ultra/i.test(((readJson(CLAUDE_JSON_PATH) || {}).oauthAccount || {}).planDisplayName || '');
 
 // keeper.conf: key=value lines, # comments. A missing file or key means the default.
 function readConf() {
@@ -240,6 +247,7 @@ function status() {
 
 async function main() {
   if (process.argv.includes('--status')) return status();
+  if (onUltra()) return;
   fs.mkdirSync(PING_CWD, { recursive: true });
 
   const conf = readConf();
